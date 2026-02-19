@@ -30,6 +30,12 @@ class LossConfig:
     w_cf: float = 1.0
     w_compute: float = 0.1
     w_batch: float = 0.01
+    # warmup_* overrides apply for steps < warmup_steps
+    warmup_lambda_compute: float = 0.0
+    warmup_w_answer: float = 0.0
+    warmup_w_cf: float = 1.0
+    warmup_w_compute: float = 0.0
+    warmup_w_batch: float = 0.1
     keep_prob: tuple[float, ...] = (0.05, 0.1, 0.15, 0.75, 1.0)
 
 
@@ -37,6 +43,9 @@ class LossConfig:
 class TrainConfig:
     seed: int = 42
     lr: float = 3e-5
+    # warmup_* overrides apply for steps < warmup_steps
+    warmup_steps: int = 0
+    warmup_lr: float = 3e-4
     weight_decay: float = 0.0
     num_train_steps: int = 2000
     print_every: int = 20
@@ -101,10 +110,15 @@ def parse_args() -> LMMSConfig:
 
     parser.add_argument("--gamma", type=float, default=LossConfig.gamma)
     parser.add_argument("--lambda_compute", type=float, default=LossConfig.lambda_compute)
+    parser.add_argument("--warmup_lambda_compute", type=float, default=LossConfig.warmup_lambda_compute)
     parser.add_argument("--w_answer", type=float, default=LossConfig.w_answer)
+    parser.add_argument("--warmup_w_answer", type=float, default=LossConfig.warmup_w_answer)
     parser.add_argument("--w_cf", type=float, default=LossConfig.w_cf)
+    parser.add_argument("--warmup_w_cf", type=float, default=LossConfig.warmup_w_cf)
     parser.add_argument("--w_compute", type=float, default=LossConfig.w_compute)
+    parser.add_argument("--warmup_w_compute", type=float, default=LossConfig.warmup_w_compute)
     parser.add_argument("--w_batch", type=float, default=LossConfig.w_batch)
+    parser.add_argument("--warmup_w_batch", type=float, default=LossConfig.warmup_w_batch)
     parser.add_argument(
         "--keep_prob",
         type=str,
@@ -114,6 +128,8 @@ def parse_args() -> LMMSConfig:
 
     parser.add_argument("--seed", type=int, default=TrainConfig.seed)
     parser.add_argument("--lr", type=float, default=TrainConfig.lr)
+    parser.add_argument("--warmup_steps", type=int, default=TrainConfig.warmup_steps)
+    parser.add_argument("--warmup_lr", type=float, default=TrainConfig.warmup_lr)
     parser.add_argument("--weight_decay", type=float, default=TrainConfig.weight_decay)
     parser.add_argument("--num_train_steps", type=int, default=TrainConfig.num_train_steps)
     parser.add_argument("--print_every", type=int, default=TrainConfig.print_every)
@@ -168,15 +184,22 @@ def parse_args() -> LMMSConfig:
         loss=LossConfig(
             gamma=args.gamma,
             lambda_compute=args.lambda_compute,
+            warmup_lambda_compute=args.warmup_lambda_compute,
             w_answer=args.w_answer,
+            warmup_w_answer=args.warmup_w_answer,
             w_cf=args.w_cf,
+            warmup_w_cf=args.warmup_w_cf,
             w_compute=args.w_compute,
+            warmup_w_compute=args.warmup_w_compute,
             w_batch=args.w_batch,
+            warmup_w_batch=args.warmup_w_batch,
             keep_prob=keep_prob,
         ),
         train=TrainConfig(
             seed=args.seed,
             lr=args.lr,
+            warmup_steps=args.warmup_steps,
+            warmup_lr=args.warmup_lr,
             weight_decay=args.weight_decay,
             num_train_steps=args.num_train_steps,
             print_every=args.print_every,

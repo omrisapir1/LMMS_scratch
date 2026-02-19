@@ -39,6 +39,40 @@ class LMMSWrapper(nn.Module):
         self.register_buffer("action_token_ids", action_token_ids, persistent=False)
         self.stop_action_index = vz
 
+    def _backbone_module_for_freeze(self) -> nn.Module:
+        # Try common causal-LM backbone attributes before falling back to the full model.
+        for attr in ("base_model", "model", "transformer"):
+            candidate = getattr(self.base_model, attr, None)
+            if isinstance(candidate, nn.Module):
+                return candidate
+        return self.base_model
+
+    def freeze_backbone(self) -> None:
+        # Freeze everything first, then explicitly re-enable warmup-allowed modules.
+        for p in self.parameters():
+            p.requires_grad = False
+
+        backbone = self._backbone_module_for_freeze()
+        for p in backbone.parameters():
+            p.requires_grad = False
+
+        in_emb = self.base_model.get_input_embeddings()
+        if in_emb is not None:
+            for p in in_emb.parameters():
+                p.requires_grad = True
+
+        out_emb = self.base_model.get_output_embeddings()
+        if out_emb is not None:
+            for p in out_emb.parameters():
+                p.requires_grad = True
+
+        for p in self.digit_heads.parameters():
+            p.requires_grad = True
+
+    def unfreeze_all(self) -> None:
+        for p in self.parameters():
+            p.requires_grad = True
+
     def _hidden_size(self) -> int:
         for attr in ("hidden_size", "n_embd", "d_model"):
             if hasattr(self.base_model.config, attr):

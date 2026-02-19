@@ -4,7 +4,7 @@ import json
 import os
 import random
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Dict, Iterator, List, Tuple
 
@@ -75,12 +75,158 @@ def _cf_warmup_scale(step: int, warmup_steps: int) -> float:
     return min(1.0, float(step) / float(warmup_steps))
 
 
+@dataclass(frozen=True)
+class ActiveTrainHyperparams:
+    phase: str
+    lr: float
+    lambda_compute: float
+    w_answer: float
+    w_cf: float
+    w_compute: float
+    w_batch: float
+
+
+@dataclass(frozen=True)
+class WarmupEmbeddingMasks:
+    in_row_mask: torch.Tensor
+    out_row_mask: torch.Tensor | None
+    tied_in_out: bool
+
+
+def _pick_override(base: float, override: float | None) -> float:
+    return base if override is None else override
+
+
+def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainHyperparams:
+    # Warmup overrides use a hard switch and apply only for steps < warmup_steps.
+    in_warmup = cfg.train.warmup_steps > 0 and global_step < cfg.train.warmup_steps
+    if in_warmup:
+        return ActiveTrainHyperparams(
+            phase="warmup",
+            lr=_pick_override(cfg.train.lr, cfg.train.warmup_lr),
+            lambda_compute=_pick_override(cfg.loss.lambda_compute, cfg.loss.warmup_lambda_compute),
+            w_answer=_pick_override(cfg.loss.w_answer, cfg.loss.warmup_w_answer),
+            w_cf=_pick_override(cfg.loss.w_cf, cfg.loss.warmup_w_cf),
+            w_compute=_pick_override(cfg.loss.w_compute, cfg.loss.warmup_w_compute),
+            w_batch=_pick_override(cfg.loss.w_batch, cfg.loss.warmup_w_batch),
+        )
+
+    return ActiveTrainHyperparams(
+        phase="normal",
+        lr=cfg.train.lr,
+        lambda_compute=cfg.loss.lambda_compute,
+        w_answer=cfg.loss.w_answer,
+        w_cf=cfg.loss.w_cf,
+        w_compute=cfg.loss.w_compute,
+        w_batch=cfg.loss.w_batch,
+    )
+
+
+def _set_optimizer_lr(opt: AdamW, lr: float) -> None:
+    for group in opt.param_groups:
+        group["lr"] = lr
+
+
+def _set_phase_trainability(model: LMMSWrapper, warmup_active: bool) -> None:
+    if warmup_active:
+        model.freeze_backbone()
+    else:
+        model.unfreeze_all()
+
+
+def _build_single_row_mask(
+    num_rows: int,
+    allowed_ids: List[int],
+    device: torch.device,
+) -> torch.Tensor:
+    if not allowed_ids:
+        raise ValueError("allowed_ids must be non-empty for warmup row masking")
+
+    max_allowed = max(allowed_ids)
+    if max_allowed >= num_rows:
+        raise ValueError(f"Warmup allowed token id {max_allowed} is out of range for matrix with {num_rows} rows")
+
+    row_mask = torch.zeros(num_rows, device=device, dtype=torch.float32)
+    row_mask[torch.tensor(sorted(set(allowed_ids)), dtype=torch.long, device=device)] = 1.0
+    return row_mask
+
+
+def _build_warmup_embedding_row_masks(
+    model: LMMSWrapper,
+    answer_token_id: int,
+    z_token_ids: List[int],
+    latent_placeholder_id: int,
+    device: torch.device,
+) -> WarmupEmbeddingMasks:
+    in_emb = model.base_model.get_input_embeddings()
+    if in_emb is None or not hasattr(in_emb, "weight"):
+        raise ValueError("Model input embeddings are required for warmup row masking")
+
+    out_emb = model.base_model.get_output_embeddings()
+    if out_emb is None or not hasattr(out_emb, "weight"):
+        raise ValueError("Model output embeddings are required for warmup row masking")
+
+    allowed_ids = {int(answer_token_id), *[int(x) for x in z_token_ids]}
+    if latent_placeholder_id >= 0:
+        allowed_ids.add(int(latent_placeholder_id))
+
+    allowed_list = sorted(allowed_ids)
+    in_mask = _build_single_row_mask(in_emb.weight.size(0), allowed_list, device=device)
+    tied_in_out = (id(in_emb.weight) == id(out_emb.weight)) or (
+        in_emb.weight.data_ptr() == out_emb.weight.data_ptr()
+    )
+    out_mask = None if tied_in_out else _build_single_row_mask(out_emb.weight.size(0), allowed_list, device=device)
+    return WarmupEmbeddingMasks(
+        in_row_mask=in_mask,
+        out_row_mask=out_mask,
+        tied_in_out=tied_in_out,
+    )
+
+
+def _apply_row_mask_to_grad(weight: torch.Tensor, row_mask: torch.Tensor) -> None:
+    if weight.grad is None:
+        return
+    weight.grad.mul_(row_mask.to(device=weight.grad.device, dtype=weight.grad.dtype).unsqueeze(1))
+
+
+def _apply_warmup_embedding_grad_masks(model: LMMSWrapper, masks: WarmupEmbeddingMasks) -> None:
+    in_emb = model.base_model.get_input_embeddings()
+    out_emb = model.base_model.get_output_embeddings()
+    if in_emb is None or not hasattr(in_emb, "weight"):
+        return
+
+    # We must row-mask output embeddings as well; otherwise warmup updates all lm_head rows.
+    if masks.tied_in_out:
+        # For tied input/output embeddings, both modules share one weight tensor, so mask once.
+        if in_emb.weight.grad is not None:
+            _apply_row_mask_to_grad(in_emb.weight, masks.in_row_mask)
+        elif out_emb is not None and hasattr(out_emb, "weight") and out_emb.weight.grad is not None:
+            _apply_row_mask_to_grad(out_emb.weight, masks.in_row_mask)
+        return
+
+    _apply_row_mask_to_grad(in_emb.weight, masks.in_row_mask)
+    if out_emb is not None and hasattr(out_emb, "weight") and masks.out_row_mask is not None:
+        _apply_row_mask_to_grad(out_emb.weight, masks.out_row_mask)
+
+
+def _build_optimizer(model: LMMSWrapper, lr: float, weight_decay: float) -> AdamW:
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        raise ValueError("No trainable parameters found for optimizer")
+    return AdamW(params, lr=lr, weight_decay=weight_decay)
+
+
 def run_three_pass(
     model: LMMSWrapper,
     batch: Dict,
     cfg: LMMSConfig,
     deterministic: bool,
     global_step: int,
+    active_lambda_compute: float | None = None,
+    active_w_answer: float | None = None,
+    active_w_cf: float | None = None,
+    active_w_compute: float | None = None,
+    active_w_batch: float | None = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     pass1 = model.pass1_policy(
         input_ids=batch["input_ids"],
@@ -149,12 +295,18 @@ def run_three_pass(
     cf_digit_logits = cat_digit_logits[bsz:]
 
     keep_prob = None if deterministic else cfg.loss.keep_prob
+    lambda_compute = cfg.loss.lambda_compute if active_lambda_compute is None else active_lambda_compute
+    w_answer = cfg.loss.w_answer if active_w_answer is None else active_w_answer
+    w_cf = cfg.loss.w_cf if active_w_cf is None else active_w_cf
+    w_compute = cfg.loss.w_compute if active_w_compute is None else active_w_compute
+    w_batch = cfg.loss.w_batch if active_w_batch is None else active_w_batch
+
     l_answer = answer_loss(ref_digit_logits, batch["answer_digits"], keep_prob=keep_prob)
     l_cf = counterfactual_loss(ref_digit_logits, cf_digit_logits)
     l_compute = compute_loss_unmasked_stop(
         p_stop_unmasked=pass1.p_stop_unmasked,
         gamma=cfg.loss.gamma,
-        lambda_compute=cfg.loss.lambda_compute,
+        lambda_compute=lambda_compute,
     )
     batch_actions = model.argmax_actions(pass1.logits_all)
     l_batch = batch_collision_loss(
@@ -167,17 +319,19 @@ def run_three_pass(
     if deterministic:
         cf_scale = 1.0
     else:
+        # global_step is the 0-based step_index from the train loop for consistent warmup indexing.
         cf_scale = _cf_warmup_scale(global_step, cfg.train.cf_warmup_steps)
 
+    cf_eff = l_cf * cf_scale
     total = combine_total_loss(
         loss_answer=l_answer,
-        loss_cf=l_cf * cf_scale,
+        loss_cf=cf_eff,
         loss_compute=l_compute,
         loss_batch=l_batch,
-        w_answer=cfg.loss.w_answer,
-        w_cf=cfg.loss.w_cf,
-        w_compute=cfg.loss.w_compute,
-        w_batch=cfg.loss.w_batch,
+        w_answer=w_answer,
+        w_cf=w_cf,
+        w_compute=w_compute,
+        w_batch=w_batch,
     )
 
     acc = digit_accuracy(ref_digit_logits, batch["answer_digits"])
@@ -192,6 +346,7 @@ def run_three_pass(
         stop_mean=stop_mean,
     )
     metrics["cf_scale"] = cf_scale
+    metrics["cf_eff"] = float(cf_eff.detach().cpu())
     return total, metrics
 
 
@@ -203,6 +358,8 @@ def evaluate(model: LMMSWrapper, loader: DataLoader, cfg: LMMSConfig, device: to
             "total": 0.0,
             "answer": 0.0,
             "cf": 0.0,
+            "cf_eff": 0.0,
+            "cf_scale": 0.0,
             "compute": 0.0,
             "batch": 0.0,
             "accuracy": 0.0,
@@ -463,13 +620,29 @@ def generate_eval_artifact(
     return out_path
 
 
-def _print_metrics(prefix: str, step: int, m: Dict[str, float]) -> None:
+def _print_metrics(
+    prefix: str,
+    step: int,
+    m: Dict[str, float],
+    phase: str,
+    active: ActiveTrainHyperparams | None = None,
+) -> None:
+    extras = ""
+    if active is not None:
+        extras = (
+            f" lr={active.lr:.6g} lambda_compute={active.lambda_compute:.6g}"
+            f" w_answer={active.w_answer:.6g} w_cf={active.w_cf:.6g}"
+            f" w_compute={active.w_compute:.6g} w_batch={active.w_batch:.6g}"
+        )
     print(
         (
-            f"[{prefix}] step={step} "
+            f"[{prefix}] step={step} phase={phase} "
             f"total={m['total']:.4f} answer={m['answer']:.4f} "
-            f"cf={m['cf']:.4f} compute={m['compute']:.4f} batch={m['batch']:.4f} "
+            f"cf={m['cf']:.4f} cf_scale={m.get('cf_scale', 1.0):.4f} "
+            f"cf_eff={m.get('cf_eff', m['cf']):.4f} "
+            f"compute={m['compute']:.4f} batch={m['batch']:.4f} "
             f"accuracy={m['accuracy']:.4f} stop_mean={m['stop_mean']:.4f}"
+            f"{extras}"
         ),
         flush=True,
     )
@@ -534,7 +707,17 @@ def train_main(cfg: LMMSConfig) -> None:
         collate_fn=collator,
     )
 
-    opt = AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    warmup_masks: WarmupEmbeddingMasks | None = None
+    if cfg.train.warmup_steps > 0:
+        warmup_masks = _build_warmup_embedding_row_masks(
+            model=model,
+            answer_token_id=vocab.answer_token_id,
+            z_token_ids=vocab.z_token_ids,
+            latent_placeholder_id=vocab.latent_placeholder_id,
+            device=device,
+        )
+    prev_phase: str | None = None
+    opt: AdamW | None = None
 
     cfg_dump_path = os.path.join(cfg.train.output_dir, "run_config.json")
     with open(cfg_dump_path, "w", encoding="utf-8") as f:
@@ -547,8 +730,21 @@ def train_main(cfg: LMMSConfig) -> None:
         artifact_every = cfg.train.eval_every * cfg.train.eval_generate_every_mult
 
     for step in range(1, cfg.train.num_train_steps + 1):
+        # Use one 0-based step_index for both warmup phase checks and cf warmup scaling.
+        step_index = step - 1
+        active = _active_train_hyperparams(cfg, global_step=step_index)
+
+        if active.phase != prev_phase:
+            _set_phase_trainability(model, warmup_active=(active.phase == "warmup"))
+            opt = _build_optimizer(model, lr=active.lr, weight_decay=cfg.train.weight_decay)
+            prev_phase = active.phase
+
+        if opt is None:
+            raise RuntimeError("Optimizer was not initialized")
+
         model.train()
         model.base_model.config.use_cache = False
+        _set_optimizer_lr(opt, active.lr)
         batch = _move_batch_to_device(next(step_iter), device)
 
         opt.zero_grad(set_to_none=True)
@@ -556,18 +752,25 @@ def train_main(cfg: LMMSConfig) -> None:
             model=model,
             batch=batch,
             cfg=cfg,
-            deterministic=False,
-            global_step=step,
+            deterministic=True,
+            global_step=step_index,
+            active_lambda_compute=active.lambda_compute,
+            active_w_answer=active.w_answer,
+            active_w_cf=active.w_cf,
+            active_w_compute=active.w_compute,
+            active_w_batch=active.w_batch,
         )
         total.backward()
+        if active.phase == "warmup" and warmup_masks is not None:
+            _apply_warmup_embedding_grad_masks(model, warmup_masks)
         opt.step()
 
         if cfg.train.print_every > 0 and step % cfg.train.print_every == 0:
-            _print_metrics("train", step, train_metrics)
+            _print_metrics("train", step, train_metrics, phase=active.phase, active=active)
 
         if cfg.train.eval_every > 0 and step % cfg.train.eval_every == 0:
             eval_metrics = evaluate(model, eval_loader, cfg=cfg, device=device)
-            _print_metrics("eval", step, eval_metrics)
+            _print_metrics("eval", step, eval_metrics, phase=active.phase)
 
         if artifact_every > 0 and step % artifact_every == 0:
             artifact_path = generate_eval_artifact(
