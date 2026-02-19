@@ -456,42 +456,6 @@ def _truncate_z_tokens(token_ids: List[int], z_token_ids: List[int], start: int,
     return keep
 
 
-def _generate_once(
-    model: LMMSWrapper,
-    tokenizer,
-    vocab,
-    prompt_ids: List[int],
-    max_new_tokens: int,
-    do_sample: bool,
-    temperature: float,
-    top_p: float,
-    device: torch.device,
-) -> List[int]:
-    eos_ids = [vocab.answer_token_id]
-    if tokenizer.eos_token_id is not None:
-        eos_ids.append(int(tokenizer.eos_token_id))
-
-    inp = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    attn = torch.ones_like(inp)
-    gen_kwargs = {
-        "input_ids": inp,
-        "attention_mask": attn,
-        "max_new_tokens": max_new_tokens,
-        "do_sample": do_sample,
-        "eos_token_id": eos_ids,
-        "pad_token_id": tokenizer.pad_token_id,
-    }
-    if do_sample:
-        gen_kwargs["temperature"] = temperature
-        gen_kwargs["top_p"] = top_p
-
-    # Explicitly enable KV cache for generation.
-    with _temporary_use_cache(model.base_model, True):
-        with torch.no_grad():
-            generated = model.base_model.generate(**gen_kwargs)
-    return generated[0].tolist()
-
-
 def _collate_one(
     eval_dataset: LMMSDataset,
     collator: LMMScollator,
@@ -527,45 +491,12 @@ def generate_eval_artifact(
     with _temporary_use_cache(model.base_model, True):
         n = min(cfg.train.artifact_eval_examples, len(eval_dataset))
         rows = []
+        allowed_set = set(vocab.z_token_ids + [vocab.answer_token_id])
 
         for i in range(n):
             row = eval_dataset.ds[i]
             question = row["question"]
             answer_digits = [int(x) for x in row["answer_digits"]]
-            policy_batch = _collate_one(
-                eval_dataset=eval_dataset,
-                collator=collator,
-                index=i,
-                device=device,
-            )
-
-            with torch.no_grad():
-                pass1 = model.pass1_policy(
-                    input_ids=policy_batch["input_ids"],
-                    attention_mask=policy_batch["attention_mask"],
-                    latent_positions=policy_batch["latent_positions"],
-                    tau=cfg.model.tau,
-                    deterministic=True,
-                )
-
-            restricted_dim = int(pass1.logits_all.size(-1))
-            expected_restricted_dim = cfg.model.Vz + 1
-            assert restricted_dim == expected_restricted_dim, (
-                f"Restricted latent-policy logits dim must be Vz+1={expected_restricted_dim}, got {restricted_dim}"
-            )
-
-            raw_action_indices_t = pass1.action_ids[0].detach().to(device="cpu")
-            alive_mask_t = pass1.alive_mask[0].detach().to(device="cpu")
-            # Artifact sequence is stop-padded after first stop so it is easy to inspect.
-            action_indices_t = raw_action_indices_t.clone()
-            action_indices_t[~alive_mask_t] = model.stop_action_index
-
-            action_token_table = torch.tensor(model.action_token_ids, dtype=torch.long, device="cpu")
-            action_token_ids_t = action_token_table[action_indices_t]
-            action_token_ids = [int(x) for x in action_token_ids_t.tolist()]
-            action_tokens = _decode_token_ids(tokenizer, action_token_ids)
-            first_stop = int(pass1.first_stop[0].item())
-            stop_mean = float(first_stop + 1)
 
             prompt_text = format_prompt(tokenizer, question)
             prompt_ids = tokenizer(
@@ -574,29 +505,39 @@ def generate_eval_artifact(
                 truncation=True,
                 max_length=cfg.data.max_length,
             )["input_ids"]
+            inp = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+            attn = torch.ones_like(inp)
 
-            greedy_ids = _generate_once(
-                model=model,
-                tokenizer=tokenizer,
-                vocab=vocab,
-                prompt_ids=prompt_ids,
+            greedy_seq = model.generate(
+                input_ids=inp,
+                attention_mask=attn,
                 max_new_tokens=cfg.train.eval_generate_max_new_tokens,
                 do_sample=False,
-                temperature=1.0,
-                top_p=1.0,
-                device=device,
             )
-            sample_ids = _generate_once(
-                model=model,
-                tokenizer=tokenizer,
-                vocab=vocab,
-                prompt_ids=prompt_ids,
+            greedy_ids = greedy_seq[0].tolist()
+
+            sample_seq = model.generate(
+                input_ids=inp,
+                attention_mask=attn,
                 max_new_tokens=cfg.train.eval_generate_max_new_tokens,
                 do_sample=True,
                 temperature=cfg.train.eval_generate_temperature,
                 top_p=cfg.train.eval_generate_top_p,
-                device=device,
             )
+            sample_ids = sample_seq[0].tolist()
+
+            for tid in greedy_ids[len(prompt_ids) :]:
+                if tid not in allowed_set:
+                    raise RuntimeError(
+                        f"Restricted generation produced disallowed token id={tid}, "
+                        f"token={tokenizer.decode([tid], skip_special_tokens=False)}"
+                    )
+            for tid in sample_ids[len(prompt_ids) :]:
+                if tid not in allowed_set:
+                    raise RuntimeError(
+                        f"Restricted generation produced disallowed token id={tid}, "
+                        f"token={tokenizer.decode([tid], skip_special_tokens=False)}"
+                    )
 
             def build_variant(ids: List[int]) -> Dict[str, List[int] | int | None | str]:
                 ans_pos = _get_first_answer_pos(ids, vocab.answer_token_id, len(prompt_ids))
@@ -656,17 +597,6 @@ def generate_eval_artifact(
                 {
                     "question": question,
                     "answer_digits": answer_digits,
-                    "policy_action_indices": [int(x) for x in action_indices_t.tolist()],
-                    "policy_action_indices_raw": [int(x) for x in raw_action_indices_t.tolist()],
-                    "policy_alive_mask": [bool(x) for x in alive_mask_t.tolist()],
-                    "policy_action_token_ids": action_token_ids,
-                    "policy_action_tokens": action_tokens,
-                    "policy_action_text": tokenizer.decode(action_token_ids, skip_special_tokens=False),
-                    "policy_first_stop": first_stop,
-                    "policy_stop_mean": stop_mean,
-                    "policy_restricted_dim": restricted_dim,
-                    "policy_restricted_dim_expected": expected_restricted_dim,
-                    "policy_restricted_dim_ok": (restricted_dim == expected_restricted_dim),
                     "greedy_full_text": greedy_v["full_text"],
                     "greedy_digit_pred": greedy_digit,
                     "sample_full_text": sample_v["full_text"],

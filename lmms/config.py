@@ -28,7 +28,7 @@ class LossConfig:
     lambda_compute: float = 1.0
     w_answer: float = 1.0
     w_cf: float = 1.0
-    w_compute: float = 0.1
+    w_compute: float = 0.01
     w_batch: float = 0.01
     # warmup_* overrides apply for steps < warmup_steps
     warmup_lambda_compute: float = 0.0

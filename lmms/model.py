@@ -6,6 +6,8 @@ from typing import Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.generation.logits_process import LogitsProcessor
+from transformers.generation.utils import LogitsProcessorList
 
 from .tokenizer import LMMSVocab
 
@@ -19,6 +21,20 @@ class Pass1Output:
     action_ids: torch.Tensor
     alive_mask: torch.Tensor
     first_stop: torch.Tensor
+
+
+class AllowedTokensOnly(LogitsProcessor):
+    def __init__(self, allowed_token_ids: list[int], fill_value: float = -1e4) -> None:
+        super().__init__()
+        self.allowed = torch.tensor(allowed_token_ids, dtype=torch.long)
+        self.fill_value = float(fill_value)
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        del input_ids
+        allowed = self.allowed.to(scores.device)
+        masked = scores.new_full(scores.shape, self.fill_value)
+        masked.index_copy_(1, allowed, scores.index_select(1, allowed))
+        return masked
 
 
 class LMMSWrapper(nn.Module):
@@ -272,3 +288,42 @@ class LMMSWrapper(nn.Module):
 
     def hard_one_hot_from_ids(self, action_ids: torch.Tensor) -> torch.Tensor:
         return F.one_hot(action_ids, num_classes=self.vz + 1).to(self._lm_head_weight().dtype)
+
+    @torch.no_grad()
+    def generate(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 64,
+        fill_value: float = -1e4,
+        **kwargs,
+    ) -> torch.Tensor:
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        allowed = [int(x) for x in self.vocab.z_token_ids] + [int(self.vocab.answer_token_id)]
+        processors = LogitsProcessorList([AllowedTokensOnly(allowed, fill_value=fill_value)])
+
+        out = self.base_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            eos_token_id=int(self.vocab.answer_token_id),
+            logits_processor=processors,
+            max_new_tokens=int(max_new_tokens),
+            pad_token_id=kwargs.pop(
+                "pad_token_id",
+                int(
+                    getattr(self.base_model.config, "pad_token_id", self.vocab.answer_token_id)
+                    or self.vocab.answer_token_id
+                ),
+            ),
+            **kwargs,
+        )
+
+        # normalize HF return type
+        if isinstance(out, torch.Tensor):
+            return out
+        if hasattr(out, "sequences"):
+            return out.sequences
+        raise TypeError(f"Unexpected generate() return type: {type(out)}")
