@@ -250,6 +250,27 @@ We train with four losses.
 
 Digit-wise cross entropy over 5 digits.
 
+To mitigate digit collapse (e.g., trivial all-zero prediction or overconfidence in leading zeros), we optionally apply digit supervision dropout.
+
+Let:
+
+keep_prob[i] be the probability of keeping supervision for digit position i.
+
+For digit index i ∈ {0..4}:
+
+L_i = CE(logits_i, target_i)
+
+
+If keep_prob is enabled:
+
+mask_i ~ Bernoulli(keep_prob[i])
+L_i = mask_i * CE(...)
+
+
+This prevents the model from overfitting to easy digit positions (e.g., frequent leading zeros) and encourages learning across all digits.
+
+If keep_prob=None, full supervision is applied to all digits.
+
 ---
 
 ## 9.2 Counterfactual Loss
@@ -296,6 +317,32 @@ L_total = w_answer L_answer
 + w_compute L_compute
 + w_batch L_batch
 
+
+---
+
+## 9.6 Digit Supervision Dropout (Optional)
+
+In practice, fixed-length numeric answers often contain structured bias (e.g., leading zeros).
+
+Without regularization, the model may:
+
+Predict trivial zero-heavy outputs
+
+Rely excessively on prompt-only shortcuts
+
+Under-utilize latent reasoning steps
+
+Digit supervision dropout mitigates this by:
+
+Reducing dominance of easy digit positions
+
+Encouraging gradient flow across all digits
+
+Making counterfactual and latent losses more influential
+
+This mechanism is optional and primarily used as a stabilization or anti-collapse tool.
+
+Digit supervision dropout only affects the answer head loss. It does not modify latent policy logits or stop-time learning.
 
 ---
 
@@ -444,7 +491,11 @@ These knobs materially affect training/eval behavior. Status is explicitly calle
 - `loss.lambda_sft`: **Legacy-only (not used in current phase)**.
 - `loss.lambda_no_answer_on_latent`: **Legacy-only (not used in current phase)**.
 - `loss.digit_temperature`: **Legacy-only (not used in current phase)**.
-- `loss.keep_prob`: **Legacy-only (not used in current phase)**.
+- `loss.keep_prob`: Optional digit supervision dropout probabilities.
+  Example:
+  `(0.02, 0.05, 0.1, 0.5, 1.0)`
+  When set, digit-wise cross entropy is randomly masked per position according to these probabilities.
+  Default: None (disabled).
 
 # 14. Quickstart
 

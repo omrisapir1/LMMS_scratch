@@ -30,6 +30,7 @@ class LossConfig:
     w_cf: float = 1.0
     w_compute: float = 0.1
     w_batch: float = 0.01
+    keep_prob: tuple[float, ...] = (0.05, 0.1, 0.15, 0.75, 1.0)
 
 
 @dataclass
@@ -58,6 +59,31 @@ class LMMSConfig:
     train: TrainConfig
 
 
+def _parse_keep_prob(raw: str | None, parser: argparse.ArgumentParser) -> tuple[float, ...] | None:
+    if raw is None:
+        return None
+
+    text = raw.strip()
+    if text == "":
+        return None
+
+    parts = [p.strip() for p in text.split(",")]
+    if len(parts) != 5:
+        parser.error("--keep_prob must have exactly 5 comma-separated floats, e.g. 0.02,0.05,0.1,0.5,1.0")
+
+    vals = []
+    for p in parts:
+        try:
+            v = float(p)
+        except ValueError:
+            parser.error(f"Invalid keep_prob value: {p}")
+        if v < 0.0 or v > 1.0:
+            parser.error(f"keep_prob values must be in [0,1], got {v}")
+        vals.append(v)
+
+    return tuple(vals)
+
+
 def parse_args() -> LMMSConfig:
     parser = argparse.ArgumentParser(description="LMMS training")
 
@@ -79,6 +105,12 @@ def parse_args() -> LMMSConfig:
     parser.add_argument("--w_cf", type=float, default=LossConfig.w_cf)
     parser.add_argument("--w_compute", type=float, default=LossConfig.w_compute)
     parser.add_argument("--w_batch", type=float, default=LossConfig.w_batch)
+    parser.add_argument(
+        "--keep_prob",
+        type=str,
+        default=None,
+        help="Comma-separated keep probabilities for 5 digit positions, e.g. 0.02,0.05,0.1,0.5,1.0",
+    )
 
     parser.add_argument("--seed", type=int, default=TrainConfig.seed)
     parser.add_argument("--lr", type=float, default=TrainConfig.lr)
@@ -116,6 +148,8 @@ def parse_args() -> LMMSConfig:
     )
 
     args = parser.parse_args()
+    keep_prob = _parse_keep_prob(args.keep_prob, parser)
+
     return LMMSConfig(
         model=ModelConfig(
             model_name_or_path=args.model_name_or_path,
@@ -138,6 +172,7 @@ def parse_args() -> LMMSConfig:
             w_cf=args.w_cf,
             w_compute=args.w_compute,
             w_batch=args.w_batch,
+            keep_prob=keep_prob,
         ),
         train=TrainConfig(
             seed=args.seed,

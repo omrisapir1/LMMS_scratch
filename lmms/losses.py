@@ -7,12 +7,34 @@ import torch
 import torch.nn.functional as F
 
 
-def answer_loss(digit_logits: torch.Tensor, answer_digits: torch.Tensor) -> torch.Tensor:
+def answer_loss(
+    digit_logits: torch.Tensor,
+    answer_digits: torch.Tensor,
+    keep_prob: tuple[float, ...] | None = None,
+) -> torch.Tensor:
     # digit_logits: [B, 5, 10], answer_digits: [B, 5]
     per_digit = []
     for d in range(5):
         per_digit.append(F.cross_entropy(digit_logits[:, d, :], answer_digits[:, d]))
-    return torch.stack(per_digit).mean()
+    per_digit_loss = torch.stack(per_digit)
+
+    if keep_prob is None:
+        return per_digit_loss.mean()
+
+    if len(keep_prob) != 5:
+        raise ValueError(f"keep_prob must contain 5 values, got {len(keep_prob)}")
+
+    keep = torch.tensor(keep_prob, device=digit_logits.device, dtype=per_digit_loss.dtype)
+    if (keep < 0).any() or (keep > 1).any():
+        raise ValueError("keep_prob values must be in [0,1]")
+
+    mask = torch.bernoulli(keep)
+    # Avoid all-dropped edge case: keep at least one digit loss active.
+    if mask.sum().item() == 0:
+        mask[-1] = 1.0
+
+    weighted = per_digit_loss * mask
+    return weighted.sum() / mask.sum().clamp_min(1.0)
 
 
 def js_divergence_from_logits(p_logits: torch.Tensor, q_logits: torch.Tensor) -> torch.Tensor:

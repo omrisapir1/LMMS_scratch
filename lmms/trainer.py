@@ -148,7 +148,8 @@ def run_three_pass(
     ref_digit_logits = cat_digit_logits[:bsz]
     cf_digit_logits = cat_digit_logits[bsz:]
 
-    l_answer = answer_loss(ref_digit_logits, batch["answer_digits"])
+    keep_prob = None if deterministic else cfg.loss.keep_prob
+    l_answer = answer_loss(ref_digit_logits, batch["answer_digits"], keep_prob=keep_prob)
     l_cf = counterfactual_loss(ref_digit_logits, cf_digit_logits)
     l_compute = compute_loss_unmasked_stop(
         p_stop_unmasked=pass1.p_stop_unmasked,
