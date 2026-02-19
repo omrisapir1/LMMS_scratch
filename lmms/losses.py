@@ -73,7 +73,13 @@ def compute_loss_unmasked_stop(
     # Power-law weighting in step index (1-based to keep the first term non-zero).
     steps = torch.arange(1, kmax + 1, device=p_stop_unmasked.device, dtype=p_stop_unmasked.dtype)
     weights = steps.pow(gamma)
-    return lambda_compute * (survival * weights.unsqueeze(0)).sum(dim=1).mean()
+    weighted_sum = (survival * weights.unsqueeze(0)).sum(dim=1)
+
+    # Normalize by maximum possible sum of weights.
+    max_sum = weights.sum().clamp_min(1e-8)
+    normalized = weighted_sum / max_sum
+
+    return lambda_compute * normalized.mean()
 
 
 def batch_collision_loss(

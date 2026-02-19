@@ -1,0 +1,30 @@
+from lmms.config import LMMSConfig, ModelConfig, DataConfig, LossConfig, TrainConfig
+from lmms.trainer import train_main
+
+cfg = LMMSConfig(
+    model=ModelConfig(
+        model_name_or_path="Qwen/Qwen2.5-Math-1.5B",
+        Kmax=16,
+        Vz=512,
+        tau=1.0,
+    ),
+    data=DataConfig(
+        dataset_name="omrisap/phaseZ",
+        train_split="train",
+        eval_split="eval",
+        batch_size=2,          # start small in notebook
+        max_length=512,
+        num_workers=0,
+    ),
+    loss=LossConfig(),
+    train=TrainConfig(
+        num_train_steps=20,    # quick smoke run
+        print_every=5,
+        eval_every=10,
+        eval_generate_every_mult=1,
+        device="cuda",         # or "cpu"
+        output_dir="outputs_notebook",
+    ),
+)
+
+train_main(cfg)
