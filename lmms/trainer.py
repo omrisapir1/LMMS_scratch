@@ -294,7 +294,7 @@ def run_three_pass(
     ref_digit_logits = cat_digit_logits[:bsz]
     cf_digit_logits = cat_digit_logits[bsz:]
 
-    keep_prob = None if deterministic else cfg.loss.keep_prob
+    keep_prob = cfg.loss.keep_prob
     lambda_compute = cfg.loss.lambda_compute if active_lambda_compute is None else active_lambda_compute
     w_answer = cfg.loss.w_answer if active_w_answer is None else active_w_answer
     w_cf = cfg.loss.w_cf if active_w_cf is None else active_w_cf
@@ -315,12 +315,12 @@ def run_three_pass(
         stop_action_index=model.stop_action_index,
         vz=cfg.model.Vz,
     )
-
-    if deterministic:
-        cf_scale = 1.0
-    else:
-        # global_step is the 0-based step_index from the train loop for consistent warmup indexing.
-        cf_scale = _cf_warmup_scale(global_step, cfg.train.cf_warmup_steps)
+    cf_scale = 1.0
+    # if deterministic:
+    #     cf_scale = 1.0
+    # else:
+    #     # global_step is the 0-based step_index from the train loop for consistent warmup indexing.
+    #     cf_scale = _cf_warmup_scale(global_step, cfg.train.cf_warmup_steps)
 
     cf_eff = l_cf * cf_scale
     total = combine_total_loss(
@@ -752,7 +752,7 @@ def train_main(cfg: LMMSConfig) -> None:
             model=model,
             batch=batch,
             cfg=cfg,
-            deterministic=True,
+            deterministic=False,
             global_step=step_index,
             active_lambda_compute=active.lambda_compute,
             active_w_answer=active.w_answer,
