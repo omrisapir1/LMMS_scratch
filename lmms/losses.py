@@ -62,7 +62,6 @@ def counterfactual_loss(ref_digit_logits: torch.Tensor, cf_digit_logits: torch.T
 def compute_loss_unmasked_stop(
     p_stop_unmasked: torch.Tensor,
     gamma: float,
-    lambda_compute: float,
 ) -> torch.Tensor:
     # p_stop_unmasked: [B, K]
     bsz, kmax = p_stop_unmasked.shape
@@ -79,7 +78,7 @@ def compute_loss_unmasked_stop(
     max_sum = weights.sum().clamp_min(1e-8)
     normalized = weighted_sum / max_sum
 
-    return lambda_compute * normalized.mean()
+    return normalized.mean()
 
 
 def batch_collision_loss(

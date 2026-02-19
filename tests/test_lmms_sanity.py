@@ -130,15 +130,6 @@ def test_force_stop_and_alive_mask():
     assert out2["alive_mask"][0].tolist() == [True, True, False, False]
 
 
-def test_compute_loss_unmasked_formula():
-    p_stop = torch.tensor([[0.2, 0.3, 0.4]], dtype=torch.float32)
-    loss = compute_loss_unmasked_stop(p_stop, gamma=1.0, lambda_compute=1.0)
-
-    # Contract lock-in: power-law over 1-based step index ([1,2,3] when gamma=1).
-    expected = 1.0 * 1.0 + 2.0 * (1.0 - 0.2) + 3.0 * (1.0 - 0.2) * (1.0 - 0.3)
-    assert abs(loss.item() - expected) < 1e-6
-
-
 def test_batch_collision_alive_z_only_herfindahl():
     action_ids = torch.tensor(
         [

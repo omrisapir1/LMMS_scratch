@@ -235,7 +235,10 @@ def run_three_pass(
         tau=cfg.model.tau,
         deterministic=deterministic,
     )
-
+    expected = cfg.model.Vz + 1
+    assert pass1.logits_all.size(-1) == expected, (
+        f"Policy logits last dim must be Vz+1={expected}, got {pass1.logits_all.size(-1)}"
+    )
     # Pass 3: counterfactual injection
     if deterministic:
         cf_action_ids, cf_alive_mask, _ = perturb_actions_deterministic(
@@ -303,11 +306,12 @@ def run_three_pass(
 
     l_answer = answer_loss(ref_digit_logits, batch["answer_digits"], keep_prob=keep_prob)
     l_cf = counterfactual_loss(ref_digit_logits, cf_digit_logits)
-    l_compute = compute_loss_unmasked_stop(
+    l_compute_raw = compute_loss_unmasked_stop(
         p_stop_unmasked=pass1.p_stop_unmasked,
         gamma=cfg.loss.gamma,
-        lambda_compute=lambda_compute,
     )
+    l_compute = lambda_compute * l_compute_raw
+
     batch_actions = model.argmax_actions(pass1.logits_all)
     l_batch = batch_collision_loss(
         action_ids=batch_actions["action_ids"],
@@ -340,12 +344,14 @@ def run_three_pass(
         total=total,
         answer=l_answer,
         cf=l_cf,
-        compute=l_compute,
+        compute=l_compute_raw,
         batch=l_batch,
         accuracy=acc,
         stop_mean=stop_mean,
     )
+    metrics["compute_scaled"] = float(l_compute.detach().cpu())
     metrics["cf_scale"] = cf_scale
+
     metrics["cf_eff"] = float(cf_eff.detach().cpu())
     return total, metrics
 
@@ -486,11 +492,29 @@ def _generate_once(
     return generated[0].tolist()
 
 
+def _collate_one(
+    eval_dataset: LMMSDataset,
+    collator: LMMScollator,
+    index: int,
+    device: torch.device,
+) -> Dict:
+    return _move_batch_to_device(collator([eval_dataset[index]]), device)
+
+
+def _decode_token_ids(tokenizer, token_ids: List[int]) -> List[str]:
+    if hasattr(tokenizer, "convert_ids_to_tokens"):
+        tokens = tokenizer.convert_ids_to_tokens(token_ids)
+        if isinstance(tokens, list):
+            return [str(t) for t in tokens]
+    return [tokenizer.decode([tid], skip_special_tokens=False) for tid in token_ids]
+
+
 def generate_eval_artifact(
     model: LMMSWrapper,
     tokenizer,
     vocab,
     eval_dataset: LMMSDataset,
+    collator: LMMScollator,
     cfg: LMMSConfig,
     device: torch.device,
     global_step: int,
@@ -508,6 +532,40 @@ def generate_eval_artifact(
             row = eval_dataset.ds[i]
             question = row["question"]
             answer_digits = [int(x) for x in row["answer_digits"]]
+            policy_batch = _collate_one(
+                eval_dataset=eval_dataset,
+                collator=collator,
+                index=i,
+                device=device,
+            )
+
+            with torch.no_grad():
+                pass1 = model.pass1_policy(
+                    input_ids=policy_batch["input_ids"],
+                    attention_mask=policy_batch["attention_mask"],
+                    latent_positions=policy_batch["latent_positions"],
+                    tau=cfg.model.tau,
+                    deterministic=True,
+                )
+
+            restricted_dim = int(pass1.logits_all.size(-1))
+            expected_restricted_dim = cfg.model.Vz + 1
+            assert restricted_dim == expected_restricted_dim, (
+                f"Restricted latent-policy logits dim must be Vz+1={expected_restricted_dim}, got {restricted_dim}"
+            )
+
+            raw_action_indices_t = pass1.action_ids[0].detach().to(device="cpu")
+            alive_mask_t = pass1.alive_mask[0].detach().to(device="cpu")
+            # Artifact sequence is stop-padded after first stop so it is easy to inspect.
+            action_indices_t = raw_action_indices_t.clone()
+            action_indices_t[~alive_mask_t] = model.stop_action_index
+
+            action_token_table = torch.tensor(model.action_token_ids, dtype=torch.long, device="cpu")
+            action_token_ids_t = action_token_table[action_indices_t]
+            action_token_ids = [int(x) for x in action_token_ids_t.tolist()]
+            action_tokens = _decode_token_ids(tokenizer, action_token_ids)
+            first_stop = int(pass1.first_stop[0].item())
+            stop_mean = float(first_stop + 1)
 
             prompt_text = format_prompt(tokenizer, question)
             prompt_ids = tokenizer(
@@ -598,6 +656,17 @@ def generate_eval_artifact(
                 {
                     "question": question,
                     "answer_digits": answer_digits,
+                    "policy_action_indices": [int(x) for x in action_indices_t.tolist()],
+                    "policy_action_indices_raw": [int(x) for x in raw_action_indices_t.tolist()],
+                    "policy_alive_mask": [bool(x) for x in alive_mask_t.tolist()],
+                    "policy_action_token_ids": action_token_ids,
+                    "policy_action_tokens": action_tokens,
+                    "policy_action_text": tokenizer.decode(action_token_ids, skip_special_tokens=False),
+                    "policy_first_stop": first_stop,
+                    "policy_stop_mean": stop_mean,
+                    "policy_restricted_dim": restricted_dim,
+                    "policy_restricted_dim_expected": expected_restricted_dim,
+                    "policy_restricted_dim_ok": (restricted_dim == expected_restricted_dim),
                     "greedy_full_text": greedy_v["full_text"],
                     "greedy_digit_pred": greedy_digit,
                     "sample_full_text": sample_v["full_text"],
@@ -778,6 +847,7 @@ def train_main(cfg: LMMSConfig) -> None:
                 tokenizer=tokenizer,
                 vocab=vocab,
                 eval_dataset=eval_ds,
+                collator=collator,
                 cfg=cfg,
                 device=device,
                 global_step=step,
