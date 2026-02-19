@@ -32,7 +32,7 @@ class LossConfig:
     w_batch: float = 0.01
     # warmup_* overrides apply for steps < warmup_steps
     warmup_lambda_compute: float = 0.0
-    warmup_w_answer: float = 0.0
+    warmup_w_answer: float = 0.1
     warmup_w_cf: float = 1.0
     warmup_w_compute: float = 0.0
     warmup_w_batch: float = 0.1
@@ -44,7 +44,7 @@ class TrainConfig:
     seed: int = 42
     lr: float = 3e-5
     # warmup_* overrides apply for steps < warmup_steps
-    warmup_steps: int = 0
+    warmup_steps: int = 50
     warmup_lr: float = 3e-4
     weight_decay: float = 0.0
     num_train_steps: int = 2000

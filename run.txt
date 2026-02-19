@@ -4,7 +4,7 @@ from lmms.trainer import train_main
 cfg = LMMSConfig(
     model=ModelConfig(
         model_name_or_path="Qwen/Qwen2.5-Math-1.5B",
-        Kmax=16,
+        Kmax=32,
         Vz=512,
         tau=1.0,
     ),
@@ -12,15 +12,15 @@ cfg = LMMSConfig(
         dataset_name="omrisap/phaseZ",
         train_split="train",
         eval_split="eval",
-        batch_size=2,          # start small in notebook
+        batch_size=256,          # start small in notebook
         max_length=512,
         num_workers=0,
     ),
     loss=LossConfig(),
     train=TrainConfig(
-        num_train_steps=20,    # quick smoke run
+        num_train_steps=1000,    # quick smoke run
         print_every=5,
-        eval_every=10,
+        eval_every=50,
         eval_generate_every_mult=1,
         device="cuda",         # or "cpu"
         output_dir="outputs_notebook",
