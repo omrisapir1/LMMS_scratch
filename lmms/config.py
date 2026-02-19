@@ -36,7 +36,7 @@ class LossConfig:
 @dataclass
 class TrainConfig:
     seed: int = 42
-    lr: float = 1e-5
+    lr: float = 1e-4
     weight_decay: float = 0.0
     num_train_steps: int = 2000
     print_every: int = 20
