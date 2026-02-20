@@ -25,25 +25,21 @@ class DataConfig:
 @dataclass
 class LossConfig:
     gamma: float = 1.5
-    lambda_compute: float = 1.0
-    w_answer: float = 1.0
     w_cf: float = 1.0
-    w_compute: float = 0.1
     w_batch: float = 0.2
     # warmup_* overrides apply for steps < warmup_steps
-    warmup_lambda_compute: float = 0.0
-    warmup_w_answer: float = 0.1
+    warmup_w_answer: float = 0.03
     warmup_w_cf: float = 1.0
     warmup_w_compute: float = 0.0
-    warmup_w_batch: float = 0.5
+    warmup_w_batch: float = 1.0
     # ---- Answer weight annealing ----
-    w_answer_start: float = 0.1
+    w_answer_start: float = 0.03
     w_answer_end: float = 1.0
     w_answer_anneal_steps: int = 1000
     # ---- Compute weight annealing ----
     w_compute_start: float = 0.01
-    w_compute_end: float = 0.01
-    w_compute_anneal_steps: float = 2000
+    w_compute_end: float = 0.1
+    w_compute_anneal_steps: int = 2000
     keep_prob: tuple[float, ...] = (0.05, 0.1, 0.15, 0.75, 1.0)
 
 
@@ -117,16 +113,12 @@ def parse_args() -> LMMSConfig:
     parser.add_argument("--num_workers", type=int, default=DataConfig.num_workers)
 
     parser.add_argument("--gamma", type=float, default=LossConfig.gamma)
-    parser.add_argument("--lambda_compute", type=float, default=LossConfig.lambda_compute)
-    parser.add_argument("--warmup_lambda_compute", type=float, default=LossConfig.warmup_lambda_compute)
-    parser.add_argument("--w_answer", type=float, default=LossConfig.w_answer)
     parser.add_argument("--warmup_w_answer", type=float, default=LossConfig.warmup_w_answer)
     parser.add_argument("--w_answer_start", type=float, default=LossConfig.w_answer_start)
     parser.add_argument("--w_answer_end", type=float, default=LossConfig.w_answer_end)
     parser.add_argument("--w_answer_anneal_steps", type=int, default=LossConfig.w_answer_anneal_steps)
     parser.add_argument("--w_cf", type=float, default=LossConfig.w_cf)
     parser.add_argument("--warmup_w_cf", type=float, default=LossConfig.warmup_w_cf)
-    parser.add_argument("--w_compute", type=float, default=LossConfig.w_compute)
     parser.add_argument("--warmup_w_compute", type=float, default=LossConfig.warmup_w_compute)
     parser.add_argument("--w_compute_start", type=float, default=LossConfig.w_compute_start)
     parser.add_argument("--w_compute_end", type=float, default=LossConfig.w_compute_end)
@@ -197,16 +189,12 @@ def parse_args() -> LMMSConfig:
         ),
         loss=LossConfig(
             gamma=args.gamma,
-            lambda_compute=args.lambda_compute,
-            warmup_lambda_compute=args.warmup_lambda_compute,
-            w_answer=args.w_answer,
             warmup_w_answer=args.warmup_w_answer,
             w_answer_start=args.w_answer_start,
             w_answer_end=args.w_answer_end,
             w_answer_anneal_steps=args.w_answer_anneal_steps,
             w_cf=args.w_cf,
             warmup_w_cf=args.warmup_w_cf,
-            w_compute=args.w_compute,
             warmup_w_compute=args.warmup_w_compute,
             w_compute_start=args.w_compute_start,
             w_compute_end=args.w_compute_end,

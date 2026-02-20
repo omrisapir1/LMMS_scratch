@@ -79,7 +79,6 @@ def _cf_warmup_scale(step: int, warmup_steps: int) -> float:
 class ActiveTrainHyperparams:
     phase: str
     lr: float
-    lambda_compute: float
     w_answer: float
     w_cf: float
     w_compute: float
@@ -95,6 +94,14 @@ class WarmupEmbeddingMasks:
 
 def _pick_override(base: float, override: float | None) -> float:
     return base if override is None else override
+
+
+def _base_weight_from_schedule(start_weight: float | None, end_weight: float | None, name: str) -> float:
+    if start_weight is not None:
+        return float(start_weight)
+    if end_weight is not None:
+        return float(end_weight)
+    raise ValueError(f"{name} requires at least one of *_start or *_end to be configured")
 
 
 def _linear_anneal_weight(
@@ -121,16 +128,18 @@ def _linear_anneal_weight(
 
 
 def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainHyperparams:
+    w_answer_base = _base_weight_from_schedule(cfg.loss.w_answer_start, cfg.loss.w_answer_end, "w_answer")
+    w_compute_base = _base_weight_from_schedule(cfg.loss.w_compute_start, cfg.loss.w_compute_end, "w_compute")
+
     # Warmup overrides use a hard switch and apply only for steps < warmup_steps.
     in_warmup = cfg.train.warmup_steps > 0 and global_step < cfg.train.warmup_steps
     if in_warmup:
         return ActiveTrainHyperparams(
             phase="warmup",
             lr=_pick_override(cfg.train.lr, cfg.train.warmup_lr),
-            lambda_compute=_pick_override(cfg.loss.lambda_compute, cfg.loss.warmup_lambda_compute),
-            w_answer=_pick_override(cfg.loss.w_answer, cfg.loss.warmup_w_answer),
+            w_answer=_pick_override(w_answer_base, cfg.loss.warmup_w_answer),
             w_cf=_pick_override(cfg.loss.w_cf, cfg.loss.warmup_w_cf),
-            w_compute=_pick_override(cfg.loss.w_compute, cfg.loss.warmup_w_compute),
+            w_compute=_pick_override(w_compute_base, cfg.loss.warmup_w_compute),
             w_batch=_pick_override(cfg.loss.w_batch, cfg.loss.warmup_w_batch),
         )
 
@@ -140,7 +149,7 @@ def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainH
         start_weight=cfg.loss.w_answer_start,
         end_weight=cfg.loss.w_answer_end,
         anneal_steps=cfg.loss.w_answer_anneal_steps,
-        default_weight=cfg.loss.w_answer,
+        default_weight=w_answer_base,
     )
     w_compute = _linear_anneal_weight(
         global_step=global_step,
@@ -148,13 +157,12 @@ def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainH
         start_weight=cfg.loss.w_compute_start,
         end_weight=cfg.loss.w_compute_end,
         anneal_steps=cfg.loss.w_compute_anneal_steps,
-        default_weight=cfg.loss.w_compute,
+        default_weight=w_compute_base,
     )
 
     return ActiveTrainHyperparams(
         phase="normal",
         lr=cfg.train.lr,
-        lambda_compute=cfg.loss.lambda_compute,
         w_answer=w_answer,
         w_cf=cfg.loss.w_cf,
         w_compute=w_compute,
@@ -262,7 +270,6 @@ def run_three_pass(
     cfg: LMMSConfig,
     deterministic: bool,
     global_step: int,
-    active_lambda_compute: float | None = None,
     active_w_answer: float | None = None,
     active_w_cf: float | None = None,
     active_w_compute: float | None = None,
@@ -338,11 +345,11 @@ def run_three_pass(
     cf_digit_logits = cat_digit_logits[bsz:]
 
     keep_prob = cfg.loss.keep_prob
-    lambda_compute = cfg.loss.lambda_compute if active_lambda_compute is None else active_lambda_compute
-    w_answer = cfg.loss.w_answer if active_w_answer is None else active_w_answer
-    w_cf = cfg.loss.w_cf if active_w_cf is None else active_w_cf
-    w_compute = cfg.loss.w_compute if active_w_compute is None else active_w_compute
-    w_batch = cfg.loss.w_batch if active_w_batch is None else active_w_batch
+    active_defaults = _active_train_hyperparams(cfg, global_step=global_step)
+    w_answer = active_defaults.w_answer if active_w_answer is None else active_w_answer
+    w_cf = active_defaults.w_cf if active_w_cf is None else active_w_cf
+    w_compute = active_defaults.w_compute if active_w_compute is None else active_w_compute
+    w_batch = active_defaults.w_batch if active_w_batch is None else active_w_batch
 
     l_answer = answer_loss(ref_digit_logits, batch["answer_digits"], keep_prob=keep_prob)
     l_cf = counterfactual_loss(ref_digit_logits, cf_digit_logits)
@@ -350,7 +357,7 @@ def run_three_pass(
         p_stop_unmasked=pass1.p_stop_unmasked,
         gamma=cfg.loss.gamma,
     )
-    l_compute = lambda_compute * l_compute_raw
+    l_compute = l_compute_raw
 
     batch_actions = model.argmax_actions(pass1.logits_all)
     l_batch = batch_collision_loss(
@@ -669,7 +676,7 @@ def _print_metrics(
     extras = ""
     if active is not None:
         extras = (
-            f" lr={active.lr:.6g} lambda_compute={active.lambda_compute:.6g}"
+            f" lr={active.lr:.6g}"
             f" w_answer={active.w_answer:.6g} w_cf={active.w_cf:.6g}"
             f" w_compute={active.w_compute:.6g} w_batch={active.w_batch:.6g}"
         )
@@ -795,7 +802,6 @@ def train_main(cfg: LMMSConfig) -> None:
             cfg=cfg,
             deterministic=False,
             global_step=step_index,
-            active_lambda_compute=active.lambda_compute,
             active_w_answer=active.w_answer,
             active_w_cf=active.w_cf,
             active_w_compute=active.w_compute,
