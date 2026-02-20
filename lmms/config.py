@@ -48,7 +48,7 @@ class TrainConfig:
     seed: int = 42
     lr: float = 3e-5
     # warmup_* overrides apply for steps < warmup_steps
-    warmup_steps: int = 100
+    warmup_steps: int = 1
     warmup_lr: float = 3e-4
     weight_decay: float = 0.0
     num_train_steps: int = 2000
