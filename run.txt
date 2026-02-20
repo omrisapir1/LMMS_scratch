@@ -18,10 +18,10 @@ cfg = LMMSConfig(
     ),
     loss=LossConfig(),
     train=TrainConfig(
-        num_train_steps=1000,    # quick smoke run
+        num_train_steps=2000,    # quick smoke run
         print_every=5,
-        eval_every=50,
-        eval_generate_every_mult=1,
+        eval_every=100,
+        eval_generate_every_mult=2,
         device="cuda",         # or "cpu"
         output_dir="outputs_notebook",
     ),

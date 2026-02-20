@@ -97,6 +97,29 @@ def _pick_override(base: float, override: float | None) -> float:
     return base if override is None else override
 
 
+def _linear_anneal_weight(
+    *,
+    global_step: int,
+    warmup_steps: int,
+    start_weight: float | None,
+    end_weight: float | None,
+    anneal_steps: int,
+    default_weight: float,
+) -> float:
+    if anneal_steps <= 0 or start_weight is None or end_weight is None:
+        return default_weight
+
+    if global_step < warmup_steps:
+        return default_weight
+
+    step_into_anneal = global_step - warmup_steps
+    if step_into_anneal >= anneal_steps:
+        return end_weight
+
+    progress = float(step_into_anneal) / float(anneal_steps)
+    return start_weight + progress * (end_weight - start_weight)
+
+
 def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainHyperparams:
     # Warmup overrides use a hard switch and apply only for steps < warmup_steps.
     in_warmup = cfg.train.warmup_steps > 0 and global_step < cfg.train.warmup_steps
@@ -111,13 +134,30 @@ def _active_train_hyperparams(cfg: LMMSConfig, global_step: int) -> ActiveTrainH
             w_batch=_pick_override(cfg.loss.w_batch, cfg.loss.warmup_w_batch),
         )
 
+    w_answer = _linear_anneal_weight(
+        global_step=global_step,
+        warmup_steps=cfg.train.warmup_steps,
+        start_weight=cfg.loss.w_answer_start,
+        end_weight=cfg.loss.w_answer_end,
+        anneal_steps=cfg.loss.w_answer_anneal_steps,
+        default_weight=cfg.loss.w_answer,
+    )
+    w_compute = _linear_anneal_weight(
+        global_step=global_step,
+        warmup_steps=cfg.train.warmup_steps,
+        start_weight=cfg.loss.w_compute_start,
+        end_weight=cfg.loss.w_compute_end,
+        anneal_steps=cfg.loss.w_compute_anneal_steps,
+        default_weight=cfg.loss.w_compute,
+    )
+
     return ActiveTrainHyperparams(
         phase="normal",
         lr=cfg.train.lr,
         lambda_compute=cfg.loss.lambda_compute,
-        w_answer=cfg.loss.w_answer,
+        w_answer=w_answer,
         w_cf=cfg.loss.w_cf,
-        w_compute=cfg.loss.w_compute,
+        w_compute=w_compute,
         w_batch=cfg.loss.w_batch,
     )
 
@@ -725,6 +765,8 @@ def train_main(cfg: LMMSConfig) -> None:
     print(f"Training on device={device}", flush=True)
     step_iter = _iter_forever(train_loader)
     artifact_every = 0
+    train_metrics_window_sum: Dict[str, float] = {}
+    train_metrics_window_count = 0
     if cfg.train.eval_every > 0 and cfg.train.eval_generate_every_mult > 0:
         artifact_every = cfg.train.eval_every * cfg.train.eval_generate_every_mult
 
@@ -764,8 +806,17 @@ def train_main(cfg: LMMSConfig) -> None:
             _apply_warmup_embedding_grad_masks(model, warmup_masks)
         opt.step()
 
+        for k, v in train_metrics.items():
+            train_metrics_window_sum[k] = train_metrics_window_sum.get(k, 0.0) + float(v)
+        train_metrics_window_count += 1
+
         if cfg.train.print_every > 0 and step % cfg.train.print_every == 0:
-            _print_metrics("train", step, train_metrics, phase=active.phase, active=active)
+            avg_train_metrics = {
+                k: (v / float(train_metrics_window_count)) for k, v in train_metrics_window_sum.items()
+            }
+            _print_metrics("train", step, avg_train_metrics, phase=active.phase, active=active)
+            train_metrics_window_sum = {}
+            train_metrics_window_count = 0
 
         if cfg.train.eval_every > 0 and step % cfg.train.eval_every == 0:
             eval_metrics = evaluate(model, eval_loader, cfg=cfg, device=device)
