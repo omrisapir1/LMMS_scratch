@@ -65,7 +65,7 @@ class TrainConfig:
     cf_warmup_steps: int = 200
     device: str = "cuda"
     output_dir: str = "outputs"
-    artifact_eval_examples: int = 64
+    artifact_eval_examples: int = 2000
 
 
 @dataclass
