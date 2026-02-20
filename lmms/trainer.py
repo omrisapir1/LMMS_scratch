@@ -536,7 +536,7 @@ def generate_eval_artifact(
     out_path = os.path.join(cfg.train.output_dir, f"eval_artifact_step{global_step}_{ts}.jsonl")
 
     with _temporary_use_cache(model.base_model, True):
-        n = min(cfg.train.artifact_eval_examples, len(eval_dataset))
+        n = min(5, len(eval_dataset))
         rows = []
         allowed_set = set(vocab.z_token_ids + [vocab.answer_token_id])
 

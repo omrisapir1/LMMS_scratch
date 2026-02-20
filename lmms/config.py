@@ -61,7 +61,6 @@ class TrainConfig:
     cf_warmup_steps: int = 200
     device: str = "cuda"
     output_dir: str = "outputs"
-    artifact_eval_examples: int = 2000
 
 
 @dataclass
@@ -163,11 +162,6 @@ def parse_args() -> LMMSConfig:
     parser.add_argument("--cf_warmup_steps", type=int, default=TrainConfig.cf_warmup_steps)
     parser.add_argument("--device", type=str, default=TrainConfig.device)
     parser.add_argument("--output_dir", type=str, default=TrainConfig.output_dir)
-    parser.add_argument(
-        "--artifact_eval_examples",
-        type=int,
-        default=TrainConfig.artifact_eval_examples,
-    )
 
     args = parser.parse_args()
     keep_prob = _parse_keep_prob(args.keep_prob, parser)
@@ -219,6 +213,5 @@ def parse_args() -> LMMSConfig:
             cf_warmup_steps=args.cf_warmup_steps,
             device=args.device,
             output_dir=args.output_dir,
-            artifact_eval_examples=args.artifact_eval_examples,
         ),
     )
